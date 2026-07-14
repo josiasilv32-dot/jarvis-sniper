@@ -1,143 +1,151 @@
-import asyncio, requests, time, re
+import asyncio, requests, time, re, os
 from playwright.async_api import async_playwright
 
-import os
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-ALVO_LUCRO_MIN = 50
-CHECK_INTERVAL = 1800
+ALVO_DESCONTO_MIN = 50 # Só avisa se desconto > 50%
+ALVO_PRECO_MAX = {
+    "iPhone 15": 700,
+    "iPhone 14": 550,
+    "PS5 Slim": 420,
+    "MacBook Air M2": 950,
+    "AirPods Pro 2": 190,
+    "Nintendo Switch": 270,
+    "Xiaomi Scooter 4": 320,
+}
 
 PRODUTOS = {
-    "iPhone 13": {"compra_max": 150, "venda_media": 450},
-    "iPhone 12": {"compra_max": 100, "venda_media": 300},
-    "PS5": {"compra_max": 180, "venda_media": 350},
-    "MacBook Air M1": {"compra_max": 250, "venda_media": 650},
-    "Xiaomi Scooter": {"compra_max": 80, "venda_media": 200},
+    "iPhone 15": {"normal": 979},
+    "iPhone 14": {"normal": 829},
+    "PS5 Slim": {"normal": 549},
+    "MacBook Air M2": {"normal": 1249},
+    "AirPods Pro 2": {"normal": 279},
+    "Nintendo Switch": {"normal": 329},
+    "Xiaomi Scooter 4": {"normal": 499},
 }
 
 def enviar_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
         requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
-    except: pass
+        print("✅ Telegram enviado")
+    except Exception as e:
+        print(f"❌ Erro Telegram: {e}")
 
 def extrair_preco(texto):
-    numeros = re.findall(r'[\d.,]+', texto.replace('.', ''))
+    numeros = re.findall(r'[\d.,]+', texto.replace('.', '').replace(' ', ''))
     return float(numeros[0].replace(',', '.')) if numeros else 0
 
-async def checar_vinted(page):
-    """VINTED - MELHOR PRA iPHONE BARATO"""
-    for produto, regras in PRODUTOS.items():
+async def checar_amazon(page):
+    """Amazon ES - Promoções"""
+    for produto, dados in PRODUTOS.items():
+        print(f"🔍 Amazon: {produto}")
         try:
-            url = f"https://www.vinted.pt/catalog?search_text={produto}&order=newest_first&price_to={regras['compra_max']}"
-            await page.goto(url, timeout=30000)
-            await page.wait_for_timeout(5000)
-            items = await page.query_selector_all('div[data-testid="grid-item"]')
-            
-            for item in items[:3]:
-                try:
-                    preco = extrair_preco(await (await item.query_selector('p[data-testid*="price"]')).inner_text())
-                    link = "https://www.vinted.pt" + await (await item.query_selector('a')).get_attribute('href')
-                    titulo = await (await item.query_selector('p[data-testid*="description"]')).inner_text()
-                    lucro = regras["venda_media"] - preco - 20
-                    
-                    if preco <= regras["compra_max"] and lucro >= ALVO_LUCRO_MIN:
-                        enviar_telegram(f"🚨 *VINTED*\n*{titulo[:50]}*\n*Preço:* {preco}€ | *Lucro:* +{lucro:.0f}€\n{link}")
-                        await asyncio.sleep(3)
-                except: continue
-        except: continue
-
-async def checar_olx(page):
-    """OLX - SEGUNDO MELHOR"""
-    for produto, regras in PRODUTOS.items():
-        try:
-            url = f"https://www.olx.pt/ads/q-{produto.replace(' ', '-')}/?search[filter_float_price:to]={regras['compra_max']}"
-            await page.goto(url, timeout=30000)
+            await page.goto(f"https://www.amazon.es/s?k={produto.replace(' ', '+')}", timeout=30000)
             await page.wait_for_timeout(4000)
-            items = await page.query_selector_all('div[data-cy="l-card"]')
+            items = await page.query_selector_all('div[data-component-type="s-search-result"]')
             
             for item in items[:3]:
                 try:
-                    preco = extrair_preco(await (await item.query_selector('p[data-testid="ad-price"]')).inner_text())
-                    link = await (await item.query_selector('a')).get_attribute('href')
-                    titulo = await (await item.query_selector('h6')).inner_text()
-                    lucro = regras["venda_media"] - preco - 20
+                    preco_el = await item.query_selector('.a-price-whole')
+                    if not preco_el: continue
+                    preco_txt = await preco_el.inner_text()
+                    preco = float(preco_txt.replace('.', '').replace(',', '.'))
                     
-                    if preco <= regras["compra_max"] and lucro >= ALVO_LUCRO_MIN:
-                        enviar_telegram(f"🚨 *OLX*\n*{titulo[:50]}*\n*Preço:* {preco}€ | *Lucro:* +{lucro:.0f}€\n{link}")
+                    link_el = await item.query_selector('h2 a')
+                    link = "https://www.amazon.es" + await link_el.get_attribute('href')
+                    titulo = await link_el.inner_text()
+                    
+                    desconto = ((dados["normal"] - preco) / dados["normal"]) * 100
+                    
+                    if preco <= ALVO_PRECO_MAX[produto] and desconto >= ALVO_DESCONTO_MIN:
+                        enviar_telegram(f"🚨 *PROMO AMAZON* 🚨\n\n*Item:* {titulo[:60]}\n*Preço:* {preco:.2f}€\n*Preço normal:* {dados['normal']}€\n*Desconto:* {desconto:.0f}%\n\n{link}")
                         await asyncio.sleep(3)
                 except: continue
-        except: continue
+            await asyncio.sleep(10)
+        except Exception as e:
+            print(f"❌ Erro Amazon {produto}: {e}")
 
-async def checar_wallapop(page):
-    """WALLAPOP - BOM PRA ESPANHA/PT"""
-    for produto, regras in PRODUTOS.items():
+async def checar_worten(page):
+    """Worten PT - Promoções"""
+    for produto, dados in PRODUTOS.items():
+        print(f"🔍 Worten: {produto}")
         try:
-            url = f"https://pt.wallapop.com/app/search?keywords={produto}&filters={{%22price_max%22:{regras['compra_max']}}}"
-            await page.goto(url, timeout=30000)
-            await page.wait_for_timeout(5000)
-            items = await page.query_selector_all('a[href*="/item/"]')
+            await page.goto(f"https://www.worten.pt/search?query={produto.replace(' ', '%20')}", timeout=30000)
+            await page.wait_for_timeout(4000)
+            items = await page.query_selector_all('.product-card')
             
             for item in items[:3]:
                 try:
-                    preco = extrair_preco(await (await item.query_selector('.ItemCard__price')).inner_text())
-                    link = "https://pt.wallapop.com" + await item.get_attribute('href')
-                    titulo = await (await item.query_selector('.ItemCard__title')).inner_text()
-                    lucro = regras["venda_media"] - preco - 20
+                    preco_el = await item.query_selector('.price-current')
+                    if not preco_el: continue
+                    preco_txt = await preco_el.inner_text()
+                    preco = extrair_preco(preco_txt)
                     
-                    if preco <= regras["compra_max"] and lucro >= ALVO_LUCRO_MIN:
-                        enviar_telegram(f"🚨 *WALLAPOP*\n*{titulo[:50]}*\n*Preço:* {preco}€ | *Lucro:* +{lucro:.0f}€\n{link}")
+                    link_el = await item.query_selector('a.product-card__link')
+                    link = "https://www.worten.pt" + await link_el.get_attribute('href')
+                    titulo = await (await item.query_selector('.product-card__title')).inner_text()
+                    
+                    desconto = ((dados["normal"] - preco) / dados["normal"]) * 100
+                    
+                    if preco <= ALVO_PRECO_MAX[produto] and desconto >= ALVO_DESCONTO_MIN:
+                        enviar_telegram(f"🚨 *PROMO WORTEN* 🚨\n\n*Item:* {titulo[:60]}\n*Preço:* {preco:.2f}€\n*Preço normal:* {dados['normal']}€\n*Desconto:* {desconto:.0f}%\n\n{link}")
                         await asyncio.sleep(3)
                 except: continue
-        except: continue
+            await asyncio.sleep(10)
+        except Exception as e:
+            print(f"❌ Erro Worten {produto}: {e}")
 
-async def checar_backmarket(page):
-    """BACKMARKET - RECONDICIONADOS"""
-    for produto, regras in PRODUTOS.items():
-        if "iPhone" not in produto and "MacBook" not in produto: continue
+async def checar_fnac(page):
+    """Fnac PT"""
+    for produto, dados in PRODUTOS.items():
+        print(f"🔍 Fnac: {produto}")
         try:
-            url = f"https://www.backmarket.pt/search?q={produto}"
-            await page.goto(url, timeout=30000)
-            await page.wait_for_timeout(5000)
-            items = await page.query_selector_all('div[data-test="productCard"]')
+            await page.goto(f"https://www.fnac.pt/SearchResult/ResultList.aspx?SCat=0&Search={produto.replace(' ', '+')}", timeout=30000)
+            await page.wait_for_timeout(4000)
+            items = await page.query_selector_all('.Article-item')
             
-            for item in items[:2]:
+            for item in items[:3]:
                 try:
-                    preco = extrair_preco(await (await item.query_selector('span[data-test="product-price"]')).inner_text())
-                    link = "https://www.backmarket.pt" + await (await item.query_selector('a')).get_attribute('href')
-                    titulo = await (await item.query_selector('h2')).inner_text()
-                    lucro = regras["venda_media"] - preco - 30
+                    preco_el = await item.query_selector('.userPrice')
+                    if not preco_el: continue
+                    preco_txt = await preco_el.inner_text()
+                    preco = extrair_preco(preco_txt)
                     
-                    if preco <= regras["compra_max"] and lucro >= ALVO_LUCRO_MIN:
-                        enviar_telegram(f"🚨 *BACKMARKET*\n*{titulo[:50]}*\n*Preço:* {preco}€ | *Lucro:* +{lucro:.0f}€\n{link}")
+                    link_el = await item.query_selector('.Article-desc a')
+                    link = "https://www.fnac.pt" + await link_el.get_attribute('href')
+                    titulo = await link_el.inner_text()
+                    
+                    desconto = ((dados["normal"] - preco) / dados["normal"]) * 100
+                    
+                    if preco <= ALVO_PRECO_MAX[produto] and desconto >= ALVO_DESCONTO_MIN:
+                        enviar_telegram(f"🚨 *PROMO FNAC* 🚨\n\n*Item:* {titulo[:60]}\n*Preço:* {preco:.2f}€\n*Preço normal:* {dados['normal']}€\n*Desconto:* {desconto:.0f}%\n\n{link}")
                         await asyncio.sleep(3)
                 except: continue
-        except: continue
+            await asyncio.sleep(10)
+        except Exception as e:
+            print(f"❌ Erro Fnac {produto}: {e}")
 
 async def main():
-    enviar_telegram("🤖 *JARVIS SNIPER V3 ONLINE*\nSites: Vinted | OLX | Wallapop | BackMarket\nCiclo: 30min\nLucro min: 50€")
+    enviar_telegram("🤖 *JARVIS SNIPER V4 ONLINE*\nVasculhando: Amazon | Worten | Fnac\nRoda a cada 1h")
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         )
         page = await context.new_page()
         
-        while True:
-            print(f"\n=== CICLO {time.strftime('%H:%M:%S')} ===")
-            try:
-                await checar_vinted(page)
-                await checar_olx(page)
-                await checar_wallapop(page)
-                await checar_backmarket(page)
-            except Exception as e:
-                print(f"Erro geral: {e}")
-            
-            print(f"😴 Dormindo 30min...")
-            await asyncio.sleep(CHECK_INTERVAL)
+        print(f"\n=== INICIANDO VASCULHA {time.strftime('%H:%M:%S')} ===")
+        try:
+            await checar_amazon(page)
+            await checar_worten(page)
+            await checar_fnac(page)
+        except Exception as e:
+            print(f"❌ Erro geral: {e}")
         
         await browser.close()
+        print("✅ Vasculha completa. Encerrando.")
 
 if __name__ == "__main__":
     asyncio.run(main())
