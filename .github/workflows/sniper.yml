@@ -2,21 +2,29 @@ name: Jarvis Sniper 24/7
 
 on:
   schedule:
-    - cron: '0 */1 * * *' # Roda 1x por hora
-  workflow_dispatch:
+    - cron: '0 */1 * * *' # Roda 1x por hora. Não muda pra não estourar limite grátis
+  workflow_dispatch: # Botão pra rodar manual
 
 jobs:
   snipe:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Baixa o código
+        uses: actions/checkout@v4
+      
+      - name: Instala Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: |
+      
+      - name: Instala dependências
+        run: |
           pip install playwright requests beautifulsoup4
           playwright install chromium
-      - env:
+      
+      - name: Roda Jarvis
+        env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python sniper.py
